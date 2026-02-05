@@ -1,0 +1,17 @@
+.env
+.env.local
+vendor/
+node_modules/
+composer.lock
+coverage/
+reports/
+*.log
+.DS_Store
+.vscode/
+.idea/
+.sonarqube/
+.scannerwork/
+uploads/
+files/*.txt
+files/*.sql
+files/*.php

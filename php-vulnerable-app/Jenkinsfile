@@ -1,0 +1,205 @@
+pipeline {
+    agent any
+
+    tools {
+        'sonar-scanner' 'SonarScanner'
+    }
+
+    environment {
+        SONAR_HOST_URL = "http://172.31.33.121:9000"
+        SONAR_SERVER_NAME = "SonarServer"
+        PHP_VERSION = "8.0"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo "📥 Cloning PHP Vulnerable Application..."
+                checkout scm
+            }
+        }
+
+        stage('Environment Setup') {
+            steps {
+                echo "⚙️ Setting up PHP environment..."
+                sh '''
+                    php --version
+                    php -m | grep -E "(json|curl|openssl)" || true
+                '''
+            }
+        }
+
+        stage('Dependency Check') {
+            steps {
+                echo "🔍 Checking PHP dependencies..."
+                sh '''
+                    if [ -f composer.json ]; then
+                        composer install --no-dev --no-scripts 2>/dev/null || true
+                    fi
+                '''
+            }
+        }
+
+        stage('Static Analysis - PHPStan') {
+            steps {
+                echo "📊 Running PHPStan static analysis..."
+                sh '''
+                    if command -v phpstan &> /dev/null; then
+                        phpstan analyse --level=0 . --no-progress 2>/dev/null || true
+                    else
+                        echo "⚠️ PHPStan not installed, skipping..."
+                    fi
+                '''
+            }
+        }
+
+        stage('Code Quality - PHP CodeSniffer') {
+            steps {
+                echo "🔍 Running PHP CodeSniffer..."
+                sh '''
+                    if command -v phpcs &> /dev/null; then
+                        phpcs --standard=PSR12 . 2>/dev/null || true
+                    else
+                        echo "⚠️ PHP CodeSniffer not installed, skipping..."
+                    fi
+                '''
+            }
+        }
+
+        stage('Security - OWASP Dependency-Check') {
+            steps {
+                echo "🔒 Running OWASP Dependency-Check..."
+                sh '''
+                    if command -v dependency-check &> /dev/null; then
+                        mkdir -p reports
+                        dependency-check --scan . --format JSON --out reports/ 2>/dev/null || true
+                    else
+                        echo "⚠️ OWASP Dependency-Check not installed"
+                    fi
+                '''
+            }
+        }
+
+        stage('SonarQube Security Scan') {
+            steps {
+                script {
+                    echo "🔐 Running SonarQube SAST analysis..."
+                    withSonarQubeEnv(SONAR_SERVER_NAME) {
+                        sh '''
+                            sonar-scanner \
+                                -Dsonar.host.url=${SONAR_HOST_URL} \
+                                -Dsonar.projectKey=php-vulnerable-app \
+                                -Dsonar.projectName="PHP Vulnerable Application" \
+                                -Dsonar.projectVersion=1.0.0 \
+                                -Dsonar.sources=. \
+                                -Dsonar.language=php \
+                                -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/reports/**" \
+                                -Dsonar.php.coverage.reportPaths=coverage/coverage.xml \
+                                -Dsonar.qualitygate.wait=false
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate Check') {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    script {
+                        echo "⏳ Waiting for SonarQube Quality Gate..."
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            echo "⚠️ Quality Gate Status: ${qg.status}"
+                        } else {
+                            echo "✅ Quality Gate: PASSED"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Generate Reports') {
+            steps {
+                echo "📝 Generating security reports..."
+                sh '''
+                    mkdir -p reports
+                    
+                    # Create vulnerability summary
+                    cat > reports/VULNERABILITIES.md << 'EOF'
+# PHP Vulnerable Application - Security Report
+
+## Identified Vulnerabilities
+
+### Critical (P1)
+- SQL Injection (CWE-89)
+- Remote Code Execution via Command Injection (CWE-78)
+- Insecure Deserialization (CWE-502)
+
+### High (P2)
+- Cross-Site Scripting (XSS) (CWE-79)
+- Path Traversal (CWE-22)
+- CSRF (CWE-352)
+- Insecure Direct Object References (IDOR) (CWE-639)
+
+### Medium (P3)
+- Weak Cryptography (CWE-327)
+- Hardcoded Credentials (CWE-798)
+- Local File Inclusion (CWE-98)
+
+### Low (P4)
+- Security Misconfiguration (CWE-16)
+- Information Disclosure (CWE-200)
+
+## Remediation Priority
+
+1. Fix SQL Injection vulnerabilities
+2. Implement input validation and sanitization
+3. Add proper authentication and authorization
+4. Use parameterized queries
+5. Enable security headers
+6. Use strong cryptography
+EOF
+                    
+                    echo "Reports generated in: $(pwd)/reports"
+                '''
+            }
+        }
+
+        stage('Build Artifact') {
+            steps {
+                echo "📦 Preparing deployment artifact..."
+                sh '''
+                    mkdir -p build
+                    rsync -av --exclude='.git' --exclude='vendor' --exclude='reports' --exclude='node_modules' . build/
+                    
+                    # Create build info
+                    cat > build/BUILD_INFO.txt << EOF
+PHP Vulnerable Application
+Build Date: $(date)
+Commit: $(git rev-parse HEAD 2>/dev/null || echo "N/A")
+Purpose: SAST Testing
+EOF
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "🏁 Pipeline execution completed"
+            
+            // Archive reports
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'build/BUILD_INFO.txt', allowEmptyArchive: true
+        }
+        
+        success {
+            echo "✅ Scan completed successfully!"
+            echo "📊 View results in SonarQube Dashboard"
+        }
+        
+        failure {
+            echo "❌ Scan encountered errors"
+        }
+    }
+}

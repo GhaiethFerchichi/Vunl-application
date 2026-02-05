@@ -1,0 +1,9 @@
+# Sample data for vulnerable application
+
+This directory is meant to store files for testing path traversal and file operations vulnerabilities.
+
+## Files
+
+- `secret.txt` - Contains sensitive information
+- `backup.sql` - Database backup
+- `config_backup.php` - Configuration backup

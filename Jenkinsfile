@@ -1,25 +1,24 @@
 pipeline {
     agent any
 
-    // 1. Auto-install the Scanner inside the Jenkins container
     tools {
+        // This ensures the scanner is installed inside the Jenkins container
+        // Make sure 'SonarScanner' matches the name in Manage Jenkins > Tools
         sonarScanner 'SonarScanner'
     }
 
     environment {
-        // 2. Networking: Use the Private IP of the EC2 instance
-        // Jenkins (Container) -> Host Network -> SonarQube (Container)
-        // REPLACE '172.31.XX.XX' with your actual EC2 Private IP
-        SONAR_HOST_URL = "http://172.31.33.121:9000"
+        // We use the server name defined in your screenshot
+        SONAR_SERVER_NAME = "SonarQube-Server"
         
-        // This Name must match 'Manage Jenkins > System > SonarQube servers'
-        SONAR_SERVER_NAME = "SonarServer" 
+        // Point to the SonarQube Private IP from your screenshot
+        SONAR_HOST_URL = "http://172.31.33.121:9000"
     }
 
     stages {
         stage('Checkout') {
             steps {
-                echo "📥 Cloning from GitHub..."
+                echo "📥 Pulling code from GitHub..."
                 checkout scm
             }
         }
@@ -27,10 +26,9 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 script {
-                    echo "🔍 Running SonarScanner..."
-                    // This injects the authentication token automatically
+                    echo "🔍 Starting Static Analysis..."
+                    // This block injects your 'SonarQube Token for the webhook' automatically
                     withSonarQubeEnv(SONAR_SERVER_NAME) {
-                        // Pass the host URL explicitly to override 'localhost' defaults
                         sh "sonar-scanner -Dsonar.host.url=${SONAR_HOST_URL}"
                     }
                 }
@@ -39,15 +37,15 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                // 3. Wait for SonarQube to call the Webhook back
-                timeout(time: 2, unit: 'MINUTES') {
+                // Jenkins will pause here and wait for SonarQube to send the Webhook result
+                timeout(time: 5, unit: 'MINUTES') {
                     script {
-                        echo "⏳ Waiting for Quality Gate..."
+                        echo "⏳ Waiting for SonarQube Quality Gate..."
                         def qg = waitForQualityGate()
                         if (qg.status != 'OK') {
                             error "❌ Pipeline Failed: Quality Gate is ${qg.status}"
                         } else {
-                            echo "✅ Pipeline Passed: Quality Gate is GREEN"
+                            echo "✅ Quality Gate Passed!"
                         }
                     }
                 }

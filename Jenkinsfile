@@ -3,7 +3,7 @@ pipeline {
 
     // 1. Auto-install the Scanner inside the Jenkins container
     tools {
-        'sonar-scanner' 'SonarScanner' 
+        sonarScanner 'SonarScanner'
     }
 
     environment {

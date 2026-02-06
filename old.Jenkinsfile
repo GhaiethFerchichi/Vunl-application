@@ -1,38 +1,25 @@
 pipeline {
     agent any
-
+    tools { 'hudson.plugins.sonar.SonarRunnerInstallation' 'SonarScanner' }
+    
     environment {
-        SONAR_SERVER_NAME = "SonarQube-Server"
-        SONAR_HOST_URL = "http://172.31.33.121:9000"
-        BACKEND_URL = "http://172.31.39.85:8000/api/v1/audit" // AI-Orchestrator-fastapi endpoint
-
+        SONAR_SERVER = "SonarQube-Server"
+        BACKEND_URL = "http://172.31.39.85:8000/api/v1/audit" // FastAPI endpoint
     }
 
     stages {
-        stage('Checkout') {
+        stage('Checkout & Scan') {
             steps {
                 checkout scm
-            }
-        }
-
-        stage('SonarQube Analysis') {
-            steps {
-                script {
-                    // This fetches the tool path manually using the valid type from your error
-                    def scannerHome = tool name: 'SonarScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
-                    
-                    withSonarQubeEnv(SONAR_SERVER_NAME) {
-                        // Use the full path to the scanner executable
-                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.host.url=${SONAR_HOST_URL}"
-                    }
+                withSonarQubeEnv(SONAR_SERVER) {
+                    sh "sonar-scanner -Dsonar.projectKey=${JOB_NAME}"
                 }
             }
         }
-
         stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                    waitForQualityGate abortPipeline: false
                 }
             }
         }

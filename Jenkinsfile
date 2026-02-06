@@ -39,21 +39,29 @@ pipeline {
         stage('AI Orchestration') {
             steps {
                 script {
-                    // 1. Get the Git Diff against the target branch (main)
-                    def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
-                    
-                    // 2. Fetch SonarQube Issues via API
-                    def sonarIssues = sh(script: "curl -s -u ${SONAR_TOKEN}: 'http://172.31.33.121:9000/api/issues/search?componentKeys=${JOB_NAME}&statuses=OPEN'", returnStdout: true).trim()
+                    // This block maps your Jenkins Credential ID to the variable 'SONAR_TOKEN'
+                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                        
+                        echo "📡 Fetching report from SonarQube..."
+                        // Fetch SonarQube Issues via API using the token
+                        def sonarIssues = sh(
+                            script: "curl -s -u ${SONAR_TOKEN}: 'http://172.31.33.121:9000/api/issues/search?componentKeys=${JOB_NAME}&statuses=OPEN'", 
+                            returnStdout: true
+                        ).trim()
 
-                    // 3. Send Everything to FastAPI
-                    def payload = groovy.json.JsonOutput.toJson([
-                        pr_number: env.CHANGE_ID, // Automatically set by GitHub/Multibranch plugin
-                        repository: env.GIT_URL,
-                        diff: gitDiff,
-                        sast_report: sonarIssues
-                    ])
+                        echo "📝 Extracting Git Diff..."
+                        def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
 
-                    sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' -d '${payload}'"
+                        echo "🚀 Sending payload to Node C..."
+                        def payload = groovy.json.JsonOutput.toJson([
+                            pr_number: env.CHANGE_ID ?: "0", // Fallback for manual builds
+                            repository: env.GIT_URL,
+                            diff: gitDiff,
+                            sast_report: sonarIssues
+                        ])
+
+                        sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' -d '${payload}'"
+                    }
                 }
             }
         }

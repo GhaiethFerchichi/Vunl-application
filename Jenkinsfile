@@ -43,31 +43,48 @@ pipeline {
         stage('AI Orchestration') {
             steps {
                 script {
-                    // Only run full AI audit for Pull Requests to save resources
-                    if (env.CHANGE_ID) {
+                    // env.CHANGE_ID is only populated in Multibranch PR builds
+                    if (env.CHANGE_ID) { 
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             
-                            echo "📡 Fetching PR report for ${SONAR_PROJECT_KEY}..."
+                            echo "🔍 Fetching comparison context..."
+                            // Ensures the local git workspace knows about the main branch
+                            sh "git fetch origin main:main || true" 
+                            
+                            echo "📝 Generating Git Diff..."
+                            // Using origin/main...HEAD is correct for PRs
+                            def gitDiff = sh(script: "git diff main...HEAD", returnStdout: true).trim()
+
+                            echo "📊 Fetching SonarQube Report..."
                             def sonarIssues = sh(
-                                script: "curl -s -u ${SONAR_TOKEN}: '${SONAR_HOST_URL}/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&statuses=OPEN'", 
+                                script: "curl -s -u ${SONAR_TOKEN}: 'http://172.31.33.121:9000/api/issues/search?componentKeys=Vunl-application&statuses=OPEN'", 
                                 returnStdout: true
                             ).trim()
 
-                            echo "📝 Extracting Git Diff against origin/main..."
-                            def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
+                            // PREVENT EMPTY DATA: If diff is empty, the AI will have nothing to audit
+                            if (gitDiff.isEmpty()) {
+                                echo "⚠️ WARNING: Git diff is empty. Check if your PR branch has new commits."
+                            }
 
-                            echo "🚀 Sending PR #${env.CHANGE_ID} payload to Node C..."
-                            def payload = groovy.json.JsonOutput.toJson([
+                            echo "🚀 Preparing Payload (Diff Size: ${gitDiff.length()} chars)"
+                            def payloadMap = [
                                 pr_number: env.CHANGE_ID,
                                 repository: env.GIT_URL,
                                 diff: gitDiff,
                                 sast_report: sonarIssues
-                            ])
-
-                            sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' -d '${payload}'"
+                            ]
+                            
+                            // CRITICAL: We use a file to send the payload. 
+                            // Direct strings in 'sh' often break due to special characters in the code diff.
+                            writeJSON file: 'payload.json', json: payloadMap
+                            
+                            sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data @payload.json"
+                            
+                            // Clean up
+                            sh "rm payload.json"
                         }
                     } else {
-                        echo "🌿 Skipping AI Orchestration: Not a Pull Request (Branch: ${env.BRANCH_NAME})"
+                        echo "🌿 Skipping AI: This is a branch build (${env.BRANCH_NAME}), not a Pull Request."
                     }
                 }
             }

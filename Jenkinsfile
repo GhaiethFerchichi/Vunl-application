@@ -46,8 +46,10 @@ pipeline {
                     if (env.CHANGE_ID) {
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             
-                            echo "📝 Generating Git Diff..."
-                            def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
+                            echo "📝 Fetching Git Diff..."
+                            // Force fetch main to ensure comparison works in detached HEAD
+                            sh "git fetch origin main:main || true"
+                            def gitDiff = sh(script: "git diff main...HEAD", returnStdout: true).trim()
 
                             echo "📊 Fetching SonarQube Report..."
                             def sonarIssues = sh(
@@ -56,20 +58,22 @@ pipeline {
                             ).trim()
 
                             echo "🚀 Preparing Payload..."
-                            // We build the JSON string manually to avoid plugin dependency
-                            def payload = groovy.json.JsonOutput.toJson([
+                            // Use built-in Groovy JSON (No plugin needed)
+                            def payloadMap = [
                                 pr_number: env.CHANGE_ID,
                                 repository: env.GIT_URL,
                                 diff: gitDiff,
                                 sast_report: sonarIssues
-                            ])
+                            ]
+                            def jsonString = groovy.json.JsonOutput.toJson(payloadMap)
 
-                            // Use standard writeFile (built-in) instead of writeJSON
-                            writeFile file: 'payload.json', text: payload
+                            // Standard writeFile works on every Jenkins
+                            writeFile file: 'payload.json', text: jsonString
 
-                            echo "📡 Sending Request to Node C..."
-                            // Use -v (verbose) to see why the network call might be failing
-                            sh "curl -v -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data @payload.json"
+                            echo "📡 Sending to Backend..."
+                            // -v (verbose) will show us the EXACT error if the network is blocked
+                            // --data-binary ensures special characters in your code don't break the curl
+                            sh "curl -v -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data-binary @payload.json"
                         }
                     }
                 }

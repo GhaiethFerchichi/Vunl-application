@@ -43,17 +43,11 @@ pipeline {
         stage('AI Orchestration') {
             steps {
                 script {
-                    // env.CHANGE_ID is only populated in Multibranch PR builds
-                    if (env.CHANGE_ID) { 
+                    if (env.CHANGE_ID) {
                         withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
                             
-                            echo "🔍 Fetching comparison context..."
-                            // Ensures the local git workspace knows about the main branch
-                            sh "git fetch origin main:main || true" 
-                            
                             echo "📝 Generating Git Diff..."
-                            // Using origin/main...HEAD is correct for PRs
-                            def gitDiff = sh(script: "git diff main...HEAD", returnStdout: true).trim()
+                            def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
 
                             echo "📊 Fetching SonarQube Report..."
                             def sonarIssues = sh(
@@ -61,30 +55,22 @@ pipeline {
                                 returnStdout: true
                             ).trim()
 
-                            // PREVENT EMPTY DATA: If diff is empty, the AI will have nothing to audit
-                            if (gitDiff.isEmpty()) {
-                                echo "⚠️ WARNING: Git diff is empty. Check if your PR branch has new commits."
-                            }
-
-                            echo "🚀 Preparing Payload (Diff Size: ${gitDiff.length()} chars)"
-                            def payloadMap = [
+                            echo "🚀 Preparing Payload..."
+                            // We build the JSON string manually to avoid plugin dependency
+                            def payload = groovy.json.JsonOutput.toJson([
                                 pr_number: env.CHANGE_ID,
                                 repository: env.GIT_URL,
                                 diff: gitDiff,
                                 sast_report: sonarIssues
-                            ]
-                            
-                            // CRITICAL: We use a file to send the payload. 
-                            // Direct strings in 'sh' often break due to special characters in the code diff.
-                            writeJSON file: 'payload.json', json: payloadMap
-                            
-                            sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data @payload.json"
-                            
-                            // Clean up
-                            sh "rm payload.json"
+                            ])
+
+                            // Use standard writeFile (built-in) instead of writeJSON
+                            writeFile file: 'payload.json', text: payload
+
+                            echo "📡 Sending Request to Node C..."
+                            // Use -v (verbose) to see why the network call might be failing
+                            sh "curl -v -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data @payload.json"
                         }
-                    } else {
-                        echo "🌿 Skipping AI: This is a branch build (${env.BRANCH_NAME}), not a Pull Request."
                     }
                 }
             }

@@ -2,65 +2,116 @@ pipeline {
     agent any
 
     environment {
-        SONAR_SERVER_NAME = "SonarQube-Server"
-        SONAR_HOST_URL = "http://172.31.33.121:9000"
-        BACKEND_URL = "http://172.31.39.85:8000/api/v1/audit" // AI-Orchestrator-fastapi endpoint
-
+        AI_BRAIN_HOST     = "http://172.31.28.118"
+        AI_BRAIN_PORT     = "11434"
+        AI_MODEL          = "qwen2.5-coder:1.5b"
+        BACKEND_URL       = "http://172.31.39.85:8000/api/v1/audit"
+        REPORT_DIR        = "PR-${env.CHANGE_ID ?: 'manual-' + env.BUILD_NUMBER}"
+        // Target branch for comparison
+        TARGET_BRANCH     = "${env.CHANGE_TARGET ?: 'main'}"
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('SonarQube Analysis') {
+        stage('Checkout & Identify Changes') {
             steps {
                 script {
-                    // This fetches the tool path manually using the valid type from your error
-                    def scannerHome = tool name: 'SonarScanner', type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    checkout scm
+                    // Fetch the target branch to ensure we can diff against it
+                    sh "git fetch origin ${TARGET_BRANCH}"
                     
-                    withSonarQubeEnv(SONAR_SERVER_NAME) {
-                        // Use the full path to the scanner executable
-                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.host.url=${SONAR_HOST_URL}"
-                    }
+                    // Get list of changed files (excluding deleted ones)
+                    env.CHANGED_FILES = sh(
+                        script: "git diff --name-only origin/${TARGET_BRANCH}...HEAD --diff-filter=d | tr '\\n' ' '",
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "🔍 Files changed in this PR: ${env.CHANGED_FILES}"
+                    stash name: 'source-code', includes: '**'
                 }
             }
         }
 
-        stage('Quality Gate') {
+        stage('Security Scanning (Delta Only)') {
+            agent { label 'security-hub' } 
             steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: false
+                script {
+                    unstash 'source-code'
+                    sh "mkdir -p ${REPORT_DIR}"
+                    
+                    // If no files changed (unlikely in a PR), skip scans
+                    if (!env.CHANGED_FILES) {
+                        echo "No file changes detected. Skipping scans."
+                        return
+                    }
+
+                    parallel(
+                        "CodeScanAI": {
+                            // Already has --changes_only true, keep it as is
+                            sh """
+                                codescanai --provider custom --model ${AI_MODEL} \
+                                           --host ${AI_BRAIN_HOST} --port ${AI_BRAIN_PORT} \
+                                           --endpoint /api/generate --directory . \
+                                           --changes_only true \
+                                           --output_file ${REPORT_DIR}/codescan_report.json
+                            """
+                        },
+                        "Gitleaks": {
+                            // We use --log-opts to scan ONLY the commits in this PR
+                            sh """
+                                docker run --rm -v \$(pwd):/path zricethezav/gitleaks:latest \
+                                detect --source=/path \
+                                --log-opts="origin/${TARGET_BRANCH}..HEAD" \
+                                --report-format=json --report-path=/path/${REPORT_DIR}/gitleaks_report.json || true
+                            """
+                        },
+                        "Semgrep": {
+                            // We pass only the changed files to Semgrep
+                            sh """
+                                docker run --rm -v \$(pwd):/src returntocorp/semgrep \
+                                semgrep scan --config auto --json \
+                                --output ${REPORT_DIR}/semgrep_report.json ${env.CHANGED_FILES} || true
+                            """
+                        },
+                        "Trivy": {
+                            // We scan only the specific files changed (FS mode)
+                            sh """
+                                docker run --rm -v \$(pwd):/root aquasec/trivy:latest \
+                                fs --format json --output /root/${REPORT_DIR}/trivy_report.json \
+                                ${env.CHANGED_FILES} || true
+                            """
+                        }
+                    )
+                    stash name: 'security-reports', includes: "${REPORT_DIR}/*.json"
                 }
             }
         }
+
         stage('AI Orchestration') {
             steps {
                 script {
-                    // This block maps your Jenkins Credential ID to the variable 'SONAR_TOKEN'
-                    withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    if (env.CHANGE_ID) {
+                        unstash 'security-reports'
                         
-                        echo "📡 Fetching report from SonarQube..."
-                        // Fetch SonarQube Issues via API using the token
-                        def sonarIssues = sh(
-                            script: "curl -s -u ${SONAR_TOKEN}: 'http://172.31.33.121:9000/api/issues/search?componentKeys=${JOB_NAME}&statuses=OPEN'", 
-                            returnStdout: true
-                        ).trim()
+                        // Use the triple-dot diff to get exactly what this PR introduces
+                        def gitDiff = sh(script: "git diff origin/${TARGET_BRANCH}...HEAD", returnStdout: true).trim()
 
-                        echo "📝 Extracting Git Diff..."
-                        def gitDiff = sh(script: "git diff origin/main...HEAD", returnStdout: true).trim()
+                        def readPRFile = { name -> 
+                            def path = "${REPORT_DIR}/${name}"
+                            return fileExists(path) ? readFile(path) : "{}" 
+                        }
 
-                        echo "🚀 Sending payload to Node C..."
-                        def payload = groovy.json.JsonOutput.toJson([
-                            pr_number: env.CHANGE_ID ?: "0", // Fallback for manual builds
-                            repository: env.GIT_URL,
-                            diff: gitDiff,
-                            sast_report: sonarIssues
-                        ])
-
-                        sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' -d '${payload}'"
+                        def payloadMap = [
+                            pr_number       : env.CHANGE_ID,
+                            repository      : env.GIT_URL,
+                            diff            : gitDiff,
+                            codescan_report : readPRFile('codescan_report.json'),
+                            gitleaks_report : readPRFile('gitleaks_report.json'),
+                            semgrep_report  : readPRFile('semgrep_report.json'),
+                            trivy_report    : readPRFile('trivy_report.json')
+                        ]
+                        
+                        writeFile file: 'final_payload.json', text: groovy.json.JsonOutput.toJson(payloadMap)
+                        sh "curl -X POST ${BACKEND_URL} -H 'Content-Type: application/json' --data-binary @final_payload.json"
                     }
                 }
             }

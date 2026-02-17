@@ -40,7 +40,8 @@ pipeline {
 
         stage('Security Scanning (Delta Only)') {
             // Use 'any' if 'security-hub' is still offline
-            agent any 
+            // agent any 
+            agent { label 'security-hub' } 
             steps {
                 script {
                     if (!env.CHANGED_FILES) {
